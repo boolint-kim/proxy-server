@@ -9,6 +9,7 @@ const PORT = 3000;
 app.use(cors());
 app.use(express.json());
 
+// UTIC API 설정
 const UTIC_API_KEY = 'spdYlAuDpMu815Bqun6bM4xMjg7gBtVChlcFWMEUGqDvbRRDx9OSu8n2gXlrj3';
 const UTIC_HEADERS = {
   'Referer': 'https://www.utic.go.kr/guide/cctvOpenData.do',
@@ -19,7 +20,9 @@ const httpsAgent = new https.Agent({
   rejectUnauthorized: false
 });
 
-// server.js - api/cctv/:cctvId 수정
+// =============================================================================
+// 메인 API: CCTV 메타데이터 + 비디오 URL
+// =============================================================================
 app.get('/api/cctv/:cctvId', async (req, res) => {
   try {
     const { cctvId } = req.params;
@@ -46,67 +49,39 @@ app.get('/api/cctv/:cctvId', async (req, res) => {
     
     const streamPageUrl = buildStreamPageUrl(cctvData);
     
-    console.log(`✅ 메타데이터 획득: ${cctvData.CCTVNAME} (KIND: ${cctvData.KIND})`);
+    console.log(`✅ 메타데이터: ${cctvData.CCTVNAME} (KIND: ${cctvData.KIND})`);
     
-    // ⭐ KIND이 MODE 또는 t인 경우 처리
     let directVideoUrl = null;
+    let playerType = 'webview'; // 기본값은 webview
     
-    if (cctvData.KIND === 'MODE' && cctvData.ID) {
-      // MODE: AJAX로 URL 가져오기
-      try {
-        const ajaxUrl = `https://www.utic.go.kr/map/getGyeonggiCctvUrl.do?cctvIp=${cctvData.ID}`;
-        console.log(`📡 AJAX 호출: ${ajaxUrl}`);
-        
-        const ajaxResponse = await axios.get(ajaxUrl, {
-          headers: UTIC_HEADERS,
-          httpsAgent: httpsAgent,
-          timeout: 15000
-        });
-        
-        let videoUrl = ajaxResponse.data.trim();
-        if (videoUrl.startsWith('//')) {
-          videoUrl = 'https:' + videoUrl;
+    // ⭐ 확실히 작동하는 KIND만 ExoPlayer 처리
+    switch (cctvData.KIND) {
+      case 'MODE': // 서울 - AJAX
+        directVideoUrl = await getUrlViaAjax(cctvData);
+        if (directVideoUrl) {
+          playerType = 'exoplayer';
         }
+        break;
         
-        directVideoUrl = videoUrl;
-        console.log(`✅ MODE 비디오 URL: ${directVideoUrl}`);
-        
-      } catch (ajaxError) {
-        console.error(`❌ AJAX 실패: ${ajaxError.message}`);
-      }
-      
-    } else if (cctvData.KIND === 't' || cctvData.KIND === 'GG') {
-        // ⭐ t와 GG 둘 다 서버에서 파싱
-        try {
-        // HTTP로 변경 (GG는 HTTP 필요)
-        let fetchUrl = streamPageUrl;
-        if (cctvData.KIND === 'GG') {
-          fetchUrl = streamPageUrl.replace('https://', 'http://');
+      case 'N': // 인천 - MMS
+        directVideoUrl = buildUrlForIncheon(cctvData);
+        if (directVideoUrl) {
+          playerType = 'exoplayer';
         }
-    
-        console.log(`📡 스트림 페이지 파싱 (${cctvData.KIND}): ${fetchUrl}`);
-
-        const pageResponse = await axios.get(streamPageUrl, {
-          headers: UTIC_HEADERS,
-          httpsAgent: httpsAgent,
-          timeout: 30000
-        });
+        break;
         
-        const html = pageResponse.data;
-        
-        // HTML 주석 제거
-        const htmlWithoutComments = html.replace(/<!--[\s\S]*?-->/g, '');
-        
-        // m3u8 URL 추출
-        const match = htmlWithoutComments.match(/(https?:\/\/[^\s"'<>]+\.m3u8)/i);
-        if (match) {
-          directVideoUrl = match[1].replace(/--+$/, '');
-          console.log(`✅ t 비디오 URL: ${directVideoUrl}`);
+      case 'E': // 대전 - MMS
+        directVideoUrl = buildUrlForDaejeon(cctvData);
+        if (directVideoUrl) {
+          playerType = 'exoplayer';
         }
+        break;
         
-      } catch (parseError) {
-        console.error(`❌ 페이지 파싱 실패: ${parseError.message}`);
-      }
+      // ⭐ 나머지는 모두 WebView
+      default:
+        console.log(`→ ${cctvData.KIND}: WebView로 처리`);
+        playerType = 'webview';
+        break;
     }
     
     res.json({
@@ -120,7 +95,8 @@ app.get('/api/cctv/:cctvId', async (req, res) => {
       },
       streamPageUrl: streamPageUrl,
       kind: cctvData.KIND,
-      directVideoUrl: directVideoUrl
+      directVideoUrl: directVideoUrl,
+      playerType: playerType
     });
     
   } catch (error) {
@@ -132,7 +108,11 @@ app.get('/api/cctv/:cctvId', async (req, res) => {
     });
   }
 });
+// =============================================================================
+// HELPER 함수들
+// =============================================================================
 
+// 스트림 페이지 URL 생성
 function buildStreamPageUrl(cctvData) {
   const baseUrl = 'https://www.utic.go.kr/jsp/map/openDataCctvStream.jsp';
   const params = new URLSearchParams();
@@ -140,353 +120,116 @@ function buildStreamPageUrl(cctvData) {
   params.append('key', UTIC_API_KEY);
   params.append('cctvid', cctvData.CCTVID);
   
-  if (cctvData.CCTVNAME) {
-    params.append('cctvName', cctvData.CCTVNAME);
-  }
-  if (cctvData.KIND) {
-    params.append('kind', cctvData.KIND);
-  }
-  if (cctvData.CCTVIP) {
-    params.append('cctvip', cctvData.CCTVIP);
-  }
-  if (cctvData.ID) {
-    params.append('id', cctvData.ID);
-  }
-  if (cctvData.PASSWD) {
-    params.append('cctvpasswd', cctvData.PASSWD);
-  }
-  if (cctvData.CH && cctvData.CH !== 'undefined') {
-    params.append('cctvch', cctvData.CH);
-  }
-  if (cctvData.PORT && cctvData.PORT !== 'undefined') {
-    params.append('cctvport', cctvData.PORT);
-  }
+  if (cctvData.CCTVNAME) params.append('cctvName', cctvData.CCTVNAME);
+  if (cctvData.KIND) params.append('kind', cctvData.KIND);
+  if (cctvData.CCTVIP) params.append('cctvip', cctvData.CCTVIP);
+  if (cctvData.ID) params.append('id', cctvData.ID);
+  if (cctvData.PASSWD) params.append('cctvpasswd', cctvData.PASSWD);
+  if (cctvData.CH && cctvData.CH !== 'undefined') params.append('cctvch', cctvData.CH);
+  if (cctvData.PORT && cctvData.PORT !== 'undefined') params.append('cctvport', cctvData.PORT);
   
   return `${baseUrl}?${params.toString()}`;
 }
 
-// server.js - 더 정교한 URL 추출
-app.get('/proxy/stream', async (req, res) => {
+// AJAX로 URL 가져오기 (MODE, GG)
+async function getUrlViaAjax(cctvData) {
   try {
-    const streamPageUrl = req.query.url;
+    const cctvIp = cctvData.ID || cctvData.CCTVIP;
+    if (!cctvIp) return null;
     
-    if (!streamPageUrl) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'URL 파라미터 필요' 
-      });
-    }
+    const ajaxUrl = `https://www.utic.go.kr/map/getGyeonggiCctvUrl.do?cctvIp=${cctvIp}`;
+    console.log(`📡 AJAX 호출 (${cctvData.KIND}): ${ajaxUrl}`);
     
-    console.log(`🔍 스트림 페이지 프록시 요청: ${streamPageUrl}`);
-    
-    const response = await axios.get(streamPageUrl, {
-      headers: UTIC_HEADERS,
-      httpsAgent: httpsAgent,
-      timeout: 30000
-    });
-    
-    const html = response.data;
-    let videoUrl = null;
-    let videoUrlSource = null;
-    
-    // 1) <video src="..."> - 우선순위 최상
-    let match = html.match(/<video[^>]+src=["']([^"']+)["']/i);
-    if (match) {
-      videoUrl = match[1];
-      videoUrlSource = 'video src attribute';
-    }
-    
-    // 2) <source src="...">
-    if (!videoUrl) {
-      match = html.match(/<source[^>]+src=["']([^"']+)["']/i);
-      if (match) {
-        videoUrl = match[1];
-        videoUrlSource = 'source src attribute';
-      }
-    }
-    
-    // 3) JavaScript에서 video.src 설정 찾기
-    // 예: video.src = 'http://...'
-    if (!videoUrl) {
-      match = html.match(/video\.src\s*=\s*["']([^"']+)["']/i);
-      if (match) {
-        videoUrl = match[1];
-        videoUrlSource = 'video.src assignment';
-      }
-    }
-    
-    // 4) hls.loadSource() 찾기
-    if (!videoUrl) {
-      match = html.match(/hls\.loadSource\s*\(\s*["']([^"']+)["']\s*\)/i);
-      if (match) {
-        videoUrl = match[1];
-        videoUrlSource = 'hls.loadSource';
-      }
-    }
-    
-    // 5) AJAX 호출에서 URL 가져오기
-    // 예: $.ajax({ url: 'getGyeonggiCctvUrl.do', ... })
-    if (!videoUrl) {
-      // getCctvUrl 패턴 찾기
-      match = html.match(/getCctvUrl\s*=\s*["']([^"']+)["']/);
-      if (match) {
-        const ajaxUrl = match[1];
-        console.log(`📡 AJAX URL 발견: ${ajaxUrl}`);
-        
-        // AJAX URL이 상대 경로면 절대 경로로 변환
-        let fullAjaxUrl = ajaxUrl;
-        if (ajaxUrl.startsWith('/')) {
-          fullAjaxUrl = 'https://www.utic.go.kr' + ajaxUrl;
-        }
-        
-        try {
-          // AJAX 엔드포인트 호출
-          const ajaxResponse = await axios.get(fullAjaxUrl, {
-            headers: UTIC_HEADERS,
-            httpsAgent: httpsAgent,
-            timeout: 15000
-          });
-          
-          videoUrl = ajaxResponse.data.trim();
-          videoUrlSource = 'ajax response';
-          console.log(`✅ AJAX로 받은 URL: ${videoUrl}`);
-        } catch (ajaxError) {
-          console.error(`❌ AJAX 호출 실패: ${ajaxError.message}`);
-        }
-      }
-    }
-    
-    // 6) m3u8 URL - 주석이 아닌 곳에서만
-    if (!videoUrl) {
-      // <!-- 주석 제거
-      const htmlWithoutComments = html.replace(/<!--[\s\S]*?-->/g, '');
-      
-      match = htmlWithoutComments.match(/(https?:\/\/[\d.:]+\/[^\s"'<>]+\.m3u8)/i);
-      if (match) {
-        videoUrl = match[1];
-        videoUrlSource = 'm3u8 in text';
-      }
-    }
-    
-    if (videoUrl) {
-      // URL 정리
-      videoUrl = videoUrl.replace(/--+$/, '');  // 끝의 -- 제거
-      videoUrl = videoUrl.trim();
-      
-      console.log(`✅ 비디오 URL 추출: ${videoUrl} (출처: ${videoUrlSource})`);
-      
-      // ⭐ URL이 실제로 접근 가능한지 확인
-      try {
-        const testResponse = await axios.head(videoUrl, {
-          headers: {
-            'User-Agent': UTIC_HEADERS['User-Agent'],
-            'Referer': streamPageUrl
-          },
-          httpsAgent: httpsAgent,
-          timeout: 5000,
-          validateStatus: (status) => status < 500
-        });
-        
-        console.log(`✅ URL 접근 가능: ${testResponse.status}`);
-        
-        return res.json({
-          success: true,
-          videoUrl: videoUrl,
-          source: videoUrlSource,
-          status: testResponse.status,
-          accessible: testResponse.status === 200
-        });
-        
-      } catch (testError) {
-        console.warn(`⚠️ URL 접근 테스트 실패: ${testError.message}`);
-        
-        // 접근 불가능하지만 URL은 반환
-        return res.json({
-          success: true,
-          videoUrl: videoUrl,
-          source: videoUrlSource,
-          accessible: false,
-          error: testError.message
-        });
-      }
-    }
-    
-    console.log(`❌ 비디오 URL 찾을 수 없음`);
-    res.status(404).json({ 
-      success: false, 
-      error: 'Video URL not found in page'
-    });
-    
-  } catch (error) {
-    console.error(`❌ 프록시 오류:`, error.message);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
-    });
-  }
-});
-
-// ⭐ KIND=MODE 전용: 실제 비디오 URL 가져오기
-app.get('/api/cctv/:cctvId/direct-url', async (req, res) => {
-  try {
-    const { cctvId } = req.params;
-    
-    console.log(`📡 직접 URL 요청: ${cctvId}`);
-    
-    // 1. 메타데이터 가져오기
-    const metadataUrl = `http://www.utic.go.kr/map/getCctvInfoById.do?cctvId=${cctvId}&key=${UTIC_API_KEY}`;
-    
-    const metaResponse = await axios.get(metadataUrl, {
-      headers: UTIC_HEADERS,
-      timeout: 15000,
-      httpsAgent: httpsAgent
-    });
-    
-    const cctvData = metaResponse.data;
-    
-    console.log('📦 메타데이터:', JSON.stringify(cctvData, null, 2));
-    
-    // ID 필드 사용
-    const cctvIdOrIp = cctvData.ID || cctvData.CCTVIP || cctvData.IP;
-    
-    if (!cctvIdOrIp) {
-      return res.status(404).json({
-        success: false,
-        error: 'ID를 찾을 수 없음',
-        metadata: cctvData
-      });
-    }
-    
-    console.log(`📍 ID: ${cctvIdOrIp}`);
-    
-    // 2. AJAX로 실제 비디오 URL 가져오기
-    const ajaxUrl = `https://www.utic.go.kr/map/getGyeonggiCctvUrl.do?cctvIp=${cctvIdOrIp}`;
-    console.log(`📡 AJAX 호출: ${ajaxUrl}`);
-    
-    const ajaxResponse = await axios.get(ajaxUrl, {
+    const response = await axios.get(ajaxUrl, {
       headers: UTIC_HEADERS,
       httpsAgent: httpsAgent,
       timeout: 15000
     });
     
-    const videoUrl = ajaxResponse.data.trim();
+    let videoUrl = response.data.trim();
     
-    console.log(`✅ 실제 비디오 URL: ${videoUrl}`);
+    // // 로 시작하면 https:// 붙이기
+    if (videoUrl.startsWith('//')) {
+      videoUrl = 'https:' + videoUrl;
+    }
     
-    res.json({
-      success: true,
-      cctvId: cctvId,
-      cctvIdOrIp: cctvIdOrIp,
-      kind: cctvData.KIND,
-      videoUrl: videoUrl
-    });
+    console.log(`✅ ${cctvData.KIND} 비디오 URL: ${videoUrl}`);
+    return videoUrl;
     
   } catch (error) {
-    console.error(`❌ 오류:`, error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
+    console.error(`❌ ${cctvData.KIND} AJAX 실패:`, error.message);
+    return null;
   }
-});
+}
 
-// ⭐ /test/stream-page도 동일하게 수정
-app.get('/test/stream-page', async (req, res) => {
-  try {
-    const streamPageUrl = req.query.url;
-    
-    if (!streamPageUrl) {
-      return res.status(400).send('URL 파라미터가 필요합니다.');
-    }
-    
-    console.log(`🔍 테스트 요청: ${streamPageUrl}`);
-    
-    const response = await axios.get(streamPageUrl, {
-      headers: UTIC_HEADERS,
-      httpsAgent: httpsAgent,
-      timeout: 30000
-    });
-    
-    const html = response.data;
-    
-    const analysis = {
-      url: streamPageUrl,
-      htmlLength: html.length,
-      hasVideo: html.includes('<video'),
-      hasSource: html.includes('<source'),
-      hasScript: html.includes('<script'),
-      errorMessage: null,
-      videoUrl: null,
-      videoUrlRaw: null // 원본 URL도 저장
-    };
-    
-    if (html.includes('지원되지 않는 프로토콜')) {
-      analysis.errorMessage = '지원되지 않는 프로토콜입니다';
-    }
-    
-    if (html.includes('비정상적인 접근')) {
-      analysis.errorMessage = '비정상적인 접근';
-    }
-    
-    // video src 추출
-    let match = html.match(/<video[^>]+src=["']([^"']+)["']/i);
-    if (match) {
-      analysis.videoUrlRaw = match[1];
-      analysis.videoUrl = match[1];
-      analysis.videoType = 'video tag src';
-    }
-    
-    // source 태그
-    if (!analysis.videoUrl) {
-      match = html.match(/<source[^>]+src=["']([^"']+)["']/i);
-      if (match) {
-        analysis.videoUrlRaw = match[1];
-        analysis.videoUrl = match[1];
-        analysis.videoType = 'source tag src';
-      }
-    }
-    
-    // m3u8 URL (개선된 정규식)
-    if (!analysis.videoUrl) {
-      match = html.match(/(https?:\/\/[\d.:]+\/[^\s"'<>]*\.m3u8)/i);
-      if (match) {
-        analysis.videoUrlRaw = match[1];
-        // ⭐ -- 제거
-        analysis.videoUrl = match[1].replace(/--+$/, '');
-        analysis.videoType = 'm3u8 in text';
-      }
-    }
-    
-    // mp4 URL
-    if (!analysis.videoUrl) {
-      match = html.match(/(https?:\/\/[\d.:]+\/[^\s"'<>]*\.mp4)/i);
-      if (match) {
-        analysis.videoUrlRaw = match[1];
-        analysis.videoUrl = match[1].replace(/--+$/, '');
-        analysis.videoType = 'mp4 in text';
-      }
-    }
-    
-    console.log('📊 분석 결과:', analysis);
-    
-    const htmlPreview = html.substring(0, 1000);
-    
-    res.json({
-      success: true,
-      analysis: analysis,
-      htmlPreview: htmlPreview
-    });
-    
-  } catch (error) {
-    console.error(`❌ 테스트 오류:`, error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
+// 인천 (N): mms://stream.fitic.go.kr/CCTVXX
+function buildUrlForIncheon(cctvData) {
+  const cctvNum = cctvData.CCTVID.substring(cctvData.CCTVID.length - 2);
+  const url = `mms://stream.fitic.go.kr/CCTV${cctvNum}`;
+  console.log(`✅ N (인천) URL: ${url}`);
+  return url;
+}
 
-// ⭐ 신규: CORS 우회 프록시 스트림 (ERR_BLOCKED_BY_ORB 대응)
+// 군산 (V): http://IP/axis-cgi/mjpg/video.cgi
+function buildUrlForGunsan(cctvData) {
+  if (!cctvData.CCTVIP) return null;
+  const url = `http://${cctvData.CCTVIP}/axis-cgi/mjpg/video.cgi`;
+  console.log(`✅ V (군산) URL: ${url}`);
+  return url;
+}
+
+// 여수 (y): http://112.164.152.X/axis-cgi/mjpg/video.cgi
+function buildUrlForYeosu(cctvData) {
+  if (!cctvData.CCTVIP || !cctvData.CH) return null;
+  const url = `http://112.164.152.${cctvData.CCTVIP}/axis-cgi/mjpg/video.cgi?resolution=4CIF&camera=${cctvData.CH}`;
+  console.log(`✅ y (여수) URL: ${url}`);
+  return url;
+}
+
+// 원주 (m): rtmp://118.46.175.150/live/ID.stream
+function buildUrlForWonju(cctvData) {
+  if (!cctvData.ID) return null;
+  const url = `rtmp://118.46.175.150/live/${cctvData.ID}.stream`;
+  console.log(`✅ m (원주) URL: ${url}`);
+  return url;
+}
+
+// 대전 (E): mms://210.99.67.118:7500/ID
+function buildUrlForDaejeon(cctvData) {
+  if (!cctvData.ID) return null;
+  const server = cctvData.ID < 31 ? '118' : '119';
+  const url = `mms://210.99.67.${server}:7500/${cctvData.ID}`;
+  console.log(`✅ E (대전) URL: ${url}`);
+  return url;
+}
+
+// 전주 (F): mms://IP:PORT
+function buildUrlForJeonju(cctvData) {
+  if (!cctvData.CCTVIP || !cctvData.ID || cctvData.CH !== '2') return null;
+  const url = `mms://${cctvData.CCTVIP}:${cctvData.ID}`;
+  console.log(`✅ F (전주) URL: ${url}`);
+  return url;
+}
+
+// 대전지방국토 (Q): mms://IP/liveID
+function buildUrlForDaejeonGukto(cctvData) {
+  if (!cctvData.CCTVIP || !cctvData.ID || cctvData.CCTVIP.startsWith('dvr')) return null;
+  const url = `mms://${cctvData.CCTVIP}/live${cctvData.ID}`;
+  console.log(`✅ Q (대전국토) URL: ${url}`);
+  return url;
+}
+
+// 시흥 (c): mms://27.101.133.164/IP
+function buildUrlForSiheung(cctvData) {
+  if (!cctvData.CCTVIP) return null;
+  const url = `mms://27.101.133.164/${cctvData.CCTVIP}`;
+  console.log(`✅ c (시흥) URL: ${url}`);
+  return url;
+}
+
+// =============================================================================
+// CORS 우회 프록시 (ERR_BLOCKED_BY_ORB 대응)
+// =============================================================================
 app.get('/proxy/direct', async (req, res) => {
   try {
     const videoUrl = req.query.url;
@@ -495,7 +238,7 @@ app.get('/proxy/direct', async (req, res) => {
       return res.status(400).json({ error: 'URL 파라미터 필요' });
     }
     
-    console.log(`📺 직접 스트림 프록시: ${videoUrl}`);
+    console.log(`📺 CORS 프록시: ${videoUrl}`);
     
     const response = await axios.get(videoUrl, {
       headers: {
@@ -507,12 +250,11 @@ app.get('/proxy/direct', async (req, res) => {
       timeout: 60000
     });
     
-    // ⭐ CORS 헤더 추가
+    // CORS 헤더
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     
-    // Content-Type 전달
     const contentType = response.headers['content-type'] || 'application/vnd.apple.mpegurl';
     res.setHeader('Content-Type', contentType);
     
@@ -520,14 +262,11 @@ app.get('/proxy/direct', async (req, res) => {
     response.data.pipe(res);
     
   } catch (error) {
-    console.error(`❌ 직접 프록시 오류:`, error.message);
+    console.error(`❌ 프록시 오류:`, error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-
-
-// OPTIONS 요청 처리 (CORS preflight)
 app.options('/proxy/direct', (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -535,23 +274,30 @@ app.options('/proxy/direct', (req, res) => {
   res.sendStatus(204);
 });
 
+// =============================================================================
+// 서버 정보
+// =============================================================================
 app.get('/', (req, res) => {
   res.json({
-    message: 'CCTV 메타데이터 서버 (WebView 방식)',
-    version: '2.1.0',
-    nodeVersion: process.version,
+    message: 'UTIC CCTV 프록시 서버',
+    version: '3.0.0',
     endpoints: {
-      'GET /': '서버 정보',
-      'GET /api/cctv/:cctvId': 'CCTV 메타데이터 및 스트림 페이지 URL',
-      'GET /proxy/stream?url=': '스트림 페이지에서 비디오 URL 추출',
-      'GET /proxy/direct?url=': 'CORS 우회 직접 스트림 프록시 (NEW)'
+      'GET /api/cctv/:cctvId': 'CCTV 메타데이터 + directVideoUrl + playerType',
+      'GET /proxy/direct?url=': 'CORS 우회 스트림 프록시'
+    },
+    supportedKinds: {
+      exoplayer: ['MODE', 'GG', 'N', 'V', 'y', 'm', 'E', 'F', 'Q', 'c'],
+      webview: ['P', 'D', 'Z', 'a', 'G', 'Y', 't', '기타']
     }
   });
 });
 
+// =============================================================================
+// 서버 시작
+// =============================================================================
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 ==============================`);
-  console.log(`🎯 CCTV 메타데이터 서버 시작!`);
+  console.log(`🎯 UTIC CCTV 프록시 서버 시작!`);
   console.log(`🌐 http://localhost:${PORT}`);
   console.log(`📦 Node.js: ${process.version}`);
   console.log(`===============================\n`);
