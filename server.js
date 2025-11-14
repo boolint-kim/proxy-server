@@ -21,15 +21,47 @@ const httpsAgent = new https.Agent({
 });
 
 // =============================================================================
+// cctvStream.js와 동일한 KIND 결정 로직
+// =============================================================================
+function getCctvKind(cctvData) {
+  const cctvId = cctvData.CCTVID;
+  
+  // cctvStream.js 45-58번째 줄 로직 그대로 구현
+  if (cctvId.substring(0, 3) === 'L01') {
+    return 'Seoul';
+  } else if (cctvId.substring(0, 3) === 'L02') {
+    return 'N';
+  } else if (cctvId.substring(0, 3) === 'L03') {
+    return 'O';
+  } else if (cctvId.substring(0, 3) === 'L04') {
+    return 'P';
+  } else if (cctvId.substring(0, 3) === 'L08') {
+    return 'd';
+  } else if (cctvId.startsWith('E44')) {
+    // ⭐ E44 경산 CCTV 추가 (UTIC API는 GG로 반환하지만 WebView에서 정상 작동)
+    return cctvData.KIND; // 'GG' 그대로 사용
+  } else {
+    // API에서 받은 KIND 그대로 사용
+    return cctvData.KIND;
+  }
+}
+
+// =============================================================================
 // 메인 API: CCTV 메타데이터 + 비디오 URL
 // =============================================================================
 app.get('/api/cctv/:cctvId', async (req, res) => {
   try {
     const { cctvId } = req.params;
     
+    console.log(`\n${'='.repeat(80)}`);
     console.log(`📡 메타데이터 요청: ${cctvId}`);
+    console.log(`${'='.repeat(80)}`);
     
     const metadataUrl = `http://www.utic.go.kr/map/getCctvInfoById.do?cctvId=${cctvId}&key=${UTIC_API_KEY}`;
+    
+    console.log(`\n📤 [UTIC API 요청]`);
+    console.log(`   URL: ${metadataUrl}`);
+    console.log(`   Headers:`, JSON.stringify(UTIC_HEADERS, null, 2));
     
     const response = await axios.get(metadataUrl, {
       headers: UTIC_HEADERS,
@@ -37,7 +69,16 @@ app.get('/api/cctv/:cctvId', async (req, res) => {
       httpsAgent: httpsAgent
     });
     
+    console.log(`\n📥 [UTIC API 응답 - 원본]`);
+    console.log(`   Status: ${response.status} ${response.statusText}`);
+    console.log(`   Content-Type: ${response.headers['content-type']}`);
+    console.log(`   Raw Data:`, typeof response.data === 'string' ? response.data : JSON.stringify(response.data));
+    
     const cctvData = response.data;
+    
+    console.log(`\n📥 [UTIC API 응답 - 파싱됨]`);
+    console.log(`   Data Type: ${typeof cctvData}`);
+    console.log(`   Parsed Data:`, JSON.stringify(cctvData, null, 2));
     
     if (cctvData.msg && cctvData.code === '9999') {
       return res.status(403).json({
@@ -47,42 +88,42 @@ app.get('/api/cctv/:cctvId', async (req, res) => {
       });
     }
     
-    const streamPageUrl = buildStreamPageUrl(cctvData);
+    // ⭐ cctvStream.js와 동일한 KIND 결정
+    const kind = getCctvKind(cctvData);
     
-    console.log(`✅ 메타데이터: ${cctvData.CCTVNAME} (KIND: ${cctvData.KIND})`);
+    console.log(`\n🔄 [KIND 결정]`);
+    console.log(`   CCTVID: ${cctvData.CCTVID}`);
+    console.log(`   원본 KIND: ${cctvData.KIND}`);
+    console.log(`   보정 KIND: ${kind}`);
+    console.log(`   적용 규칙: ${getKindRule(cctvData.CCTVID)}`);
     
-    let directVideoUrl = null;
-    let playerType = 'webview'; // 기본값은 webview
+    const streamPageUrl = buildStreamPageUrl(cctvData, kind);
     
-    // ⭐ 확실히 작동하는 KIND만 ExoPlayer 처리
-    switch (cctvData.KIND) {
-      case 'MODE': // 서울 - AJAX
-        directVideoUrl = await getUrlViaAjax(cctvData);
-        if (directVideoUrl) {
-          playerType = 'exoplayer';
-        }
-        break;
-        
-      case 'N': // 인천 - MMS
-        directVideoUrl = buildUrlForIncheon(cctvData);
-        if (directVideoUrl) {
-          playerType = 'exoplayer';
-        }
-        break;
-        
-      case 'E': // 대전 - MMS
-        directVideoUrl = buildUrlForDaejeon(cctvData);
-        if (directVideoUrl) {
-          playerType = 'exoplayer';
-        }
-        break;
-        
-      // ⭐ 나머지는 모두 WebView
-      default:
-        console.log(`→ ${cctvData.KIND}: WebView로 처리`);
-        playerType = 'webview';
-        break;
-    }
+    console.log(`\n🌐 [WebView URL 생성]`);
+    console.log(`   URL: ${streamPageUrl}`);
+    console.log(`   Parameters:`);
+    console.log(`     - cctvid: ${cctvData.CCTVID}`);
+    console.log(`     - cctvName: ${cctvData.CCTVNAME}`);
+    console.log(`     - kind: ${kind}`);
+    console.log(`     - cctvip: ${cctvData.CCTVIP || 'undefined'}`);
+    console.log(`     - id: ${cctvData.ID || 'undefined'}`);
+    console.log(`     - cctvch: ${cctvData.CH || 'undefined'}`);
+    console.log(`     - cctvport: ${cctvData.PORT || 'undefined'}`);
+    console.log(`     - cctvpasswd: ${cctvData.PASSWD || 'undefined'}`);
+    
+    console.log(`\n✅ 메타데이터: ${cctvData.CCTVNAME} (센터: ${cctvData.CENTERNAME})`);
+    console.log(`   위치: (${cctvData.YCOORD}, ${cctvData.XCOORD})`);
+    console.log(`   재생 방식: WebView (UTIC 공식)`);
+    
+    // ⭐ 모든 CCTV를 WebView로 처리 (UTIC 공식 방식)
+    const playerType = 'webview';
+    const directVideoUrl = null;
+    
+    console.log(`\n📤 [클라이언트 응답]`);
+    console.log(`   CCTV: ${cctvData.CCTVNAME} (${cctvId})`);
+    console.log(`   KIND: ${kind}`);
+    console.log(`   PlayerType: ${playerType}`);
+    console.log(`${'='.repeat(80)}\n`);
     
     res.json({
       success: true,
@@ -94,13 +135,18 @@ app.get('/api/cctv/:cctvId', async (req, res) => {
         lng: cctvData.XCOORD
       },
       streamPageUrl: streamPageUrl,
-      kind: cctvData.KIND,
+      kind: kind, // ⭐ 보정된 KIND 반환
       directVideoUrl: directVideoUrl,
       playerType: playerType
     });
     
   } catch (error) {
-    console.error(`❌ 오류 (${req.params.cctvId}):`, error.message);
+    console.error(`\n❌ [오류 발생]`);
+    console.error(`   CCTV ID: ${req.params.cctvId}`);
+    console.error(`   에러: ${error.message}`);
+    console.error(`   스택:`, error.stack);
+    console.error(`${'='.repeat(80)}\n`);
+    
     res.status(500).json({
       success: false,
       error: error.message,
@@ -108,12 +154,32 @@ app.get('/api/cctv/:cctvId', async (req, res) => {
     });
   }
 });
+
 // =============================================================================
 // HELPER 함수들
 // =============================================================================
 
+// KIND 결정 규칙 설명 (디버깅용)
+function getKindRule(cctvId) {
+  if (cctvId.substring(0, 3) === 'L01') {
+    return 'L01XXX → Seoul';
+  } else if (cctvId.substring(0, 3) === 'L02') {
+    return 'L02XXX → N (인천)';
+  } else if (cctvId.substring(0, 3) === 'L03') {
+    return 'L03XXX → O (부천)';
+  } else if (cctvId.substring(0, 3) === 'L04') {
+    return 'L04XXX → P (광명)';
+  } else if (cctvId.substring(0, 3) === 'L08') {
+    return 'L08XXX → d (용인)';
+  } else if (cctvId.startsWith('E44')) {
+    return 'E44XXX → GG (경산, API KIND 유지)';
+  } else {
+    return 'API KIND 그대로 사용';
+  }
+}
+
 // 스트림 페이지 URL 생성
-function buildStreamPageUrl(cctvData) {
+function buildStreamPageUrl(cctvData, kind) {
   const baseUrl = 'https://www.utic.go.kr/jsp/map/openDataCctvStream.jsp';
   const params = new URLSearchParams();
   
@@ -121,7 +187,10 @@ function buildStreamPageUrl(cctvData) {
   params.append('cctvid', cctvData.CCTVID);
   
   if (cctvData.CCTVNAME) params.append('cctvName', cctvData.CCTVNAME);
-  if (cctvData.KIND) params.append('kind', cctvData.KIND);
+  
+  // ⭐ 보정된 KIND 사용
+  params.append('kind', kind);
+  
   if (cctvData.CCTVIP) params.append('cctvip', cctvData.CCTVIP);
   if (cctvData.ID) params.append('id', cctvData.ID);
   if (cctvData.PASSWD) params.append('cctvpasswd', cctvData.PASSWD);
@@ -129,102 +198,6 @@ function buildStreamPageUrl(cctvData) {
   if (cctvData.PORT && cctvData.PORT !== 'undefined') params.append('cctvport', cctvData.PORT);
   
   return `${baseUrl}?${params.toString()}`;
-}
-
-// AJAX로 URL 가져오기 (MODE, GG)
-async function getUrlViaAjax(cctvData) {
-  try {
-    const cctvIp = cctvData.ID || cctvData.CCTVIP;
-    if (!cctvIp) return null;
-    
-    const ajaxUrl = `https://www.utic.go.kr/map/getGyeonggiCctvUrl.do?cctvIp=${cctvIp}`;
-    console.log(`📡 AJAX 호출 (${cctvData.KIND}): ${ajaxUrl}`);
-    
-    const response = await axios.get(ajaxUrl, {
-      headers: UTIC_HEADERS,
-      httpsAgent: httpsAgent,
-      timeout: 15000
-    });
-    
-    let videoUrl = response.data.trim();
-    
-    // // 로 시작하면 https:// 붙이기
-    if (videoUrl.startsWith('//')) {
-      videoUrl = 'https:' + videoUrl;
-    }
-    
-    console.log(`✅ ${cctvData.KIND} 비디오 URL: ${videoUrl}`);
-    return videoUrl;
-    
-  } catch (error) {
-    console.error(`❌ ${cctvData.KIND} AJAX 실패:`, error.message);
-    return null;
-  }
-}
-
-// 인천 (N): mms://stream.fitic.go.kr/CCTVXX
-function buildUrlForIncheon(cctvData) {
-  const cctvNum = cctvData.CCTVID.substring(cctvData.CCTVID.length - 2);
-  const url = `mms://stream.fitic.go.kr/CCTV${cctvNum}`;
-  console.log(`✅ N (인천) URL: ${url}`);
-  return url;
-}
-
-// 군산 (V): http://IP/axis-cgi/mjpg/video.cgi
-function buildUrlForGunsan(cctvData) {
-  if (!cctvData.CCTVIP) return null;
-  const url = `http://${cctvData.CCTVIP}/axis-cgi/mjpg/video.cgi`;
-  console.log(`✅ V (군산) URL: ${url}`);
-  return url;
-}
-
-// 여수 (y): http://112.164.152.X/axis-cgi/mjpg/video.cgi
-function buildUrlForYeosu(cctvData) {
-  if (!cctvData.CCTVIP || !cctvData.CH) return null;
-  const url = `http://112.164.152.${cctvData.CCTVIP}/axis-cgi/mjpg/video.cgi?resolution=4CIF&camera=${cctvData.CH}`;
-  console.log(`✅ y (여수) URL: ${url}`);
-  return url;
-}
-
-// 원주 (m): rtmp://118.46.175.150/live/ID.stream
-function buildUrlForWonju(cctvData) {
-  if (!cctvData.ID) return null;
-  const url = `rtmp://118.46.175.150/live/${cctvData.ID}.stream`;
-  console.log(`✅ m (원주) URL: ${url}`);
-  return url;
-}
-
-// 대전 (E): mms://210.99.67.118:7500/ID
-function buildUrlForDaejeon(cctvData) {
-  if (!cctvData.ID) return null;
-  const server = cctvData.ID < 31 ? '118' : '119';
-  const url = `mms://210.99.67.${server}:7500/${cctvData.ID}`;
-  console.log(`✅ E (대전) URL: ${url}`);
-  return url;
-}
-
-// 전주 (F): mms://IP:PORT
-function buildUrlForJeonju(cctvData) {
-  if (!cctvData.CCTVIP || !cctvData.ID || cctvData.CH !== '2') return null;
-  const url = `mms://${cctvData.CCTVIP}:${cctvData.ID}`;
-  console.log(`✅ F (전주) URL: ${url}`);
-  return url;
-}
-
-// 대전지방국토 (Q): mms://IP/liveID
-function buildUrlForDaejeonGukto(cctvData) {
-  if (!cctvData.CCTVIP || !cctvData.ID || cctvData.CCTVIP.startsWith('dvr')) return null;
-  const url = `mms://${cctvData.CCTVIP}/live${cctvData.ID}`;
-  console.log(`✅ Q (대전국토) URL: ${url}`);
-  return url;
-}
-
-// 시흥 (c): mms://27.101.133.164/IP
-function buildUrlForSiheung(cctvData) {
-  if (!cctvData.CCTVIP) return null;
-  const url = `mms://27.101.133.164/${cctvData.CCTVIP}`;
-  console.log(`✅ c (시흥) URL: ${url}`);
-  return url;
 }
 
 // =============================================================================
@@ -280,15 +253,29 @@ app.options('/proxy/direct', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     message: 'UTIC CCTV 프록시 서버',
-    version: '3.0.0',
+    version: '4.0.0',
+    strategy: 'WebView Only (UTIC 공식 방식)',
+    changes: [
+      'ExoPlayer 로직 제거 - WebView 전용으로 단순화',
+      'cctvStream.js의 KIND 결정 로직 반영',
+      'L01 → Seoul, L02 → N, L03 → O, L04 → P, L08 → d 자동 변환',
+      'E44 (경산) CCTV도 WebView로 정상 재생',
+      'UTIC의 복잡한 매핑 로직을 그대로 사용하여 정확도 향상'
+    ],
     endpoints: {
-      'GET /api/cctv/:cctvId': 'CCTV 메타데이터 + directVideoUrl + playerType',
-      'GET /proxy/direct?url=': 'CORS 우회 스트림 프록시'
+      'GET /api/cctv/:cctvId': 'CCTV 메타데이터 + WebView URL',
+      'GET /proxy/direct?url=': 'CORS 우회 스트림 프록시 (선택사항)'
     },
-    supportedKinds: {
-      exoplayer: ['MODE', 'GG', 'N', 'V', 'y', 'm', 'E', 'F', 'Q', 'c'],
-      webview: ['P', 'D', 'Z', 'a', 'G', 'Y', 't', '기타']
-    }
+    kindMapping: {
+      'L01XXX': 'Seoul (서울)',
+      'L02XXX': 'N (인천)',
+      'L03XXX': 'O (부천)',
+      'L04XXX': 'P (광명)',
+      'L08XXX': 'd (용인)',
+      'E44XXX': 'GG (경산)',
+      'other': 'API 응답 KIND 그대로 사용'
+    },
+    playerType: 'webview (모든 CCTV)'
   });
 });
 
@@ -300,5 +287,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`🎯 UTIC CCTV 프록시 서버 시작!`);
   console.log(`🌐 http://localhost:${PORT}`);
   console.log(`📦 Node.js: ${process.version}`);
+  console.log(`✅ WebView 전용 (UTIC 공식 방식)`);
+  console.log(`✅ cctvStream.js KIND 로직 적용`);
   console.log(`===============================\n`);
 });
